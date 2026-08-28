@@ -1,0 +1,16 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+set(GRAPHCACHE_HAS_CUDA @GRAPHCACHE_HAS_CUDA@)
+if(GRAPHCACHE_HAS_CUDA)
+  find_dependency(CUDAToolkit)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/GraphCacheTargets.cmake")
+
+# Compile-time feature flag matching the build.
+if(GRAPHCACHE_HAS_CUDA AND TARGET GraphCache::graphcache)
+  target_compile_definitions(GraphCache::graphcache PUBLIC GC_HAS_CUDA=1)
+endif()
+
+check_required_components(GraphCache)

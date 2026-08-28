@@ -1,0 +1,5 @@
+add_executable(gc main.cpp)
+target_link_libraries(gc PRIVATE graphcache)
+if(GRAPHCACHE_HAS_CUDA)
+  target_compile_definitions(gc PRIVATE GC_HAS_CUDA=1)
+endif()

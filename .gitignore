@@ -1,0 +1,30 @@
+# Build trees
+/build*/
+/build/
+/out/
+/cmake-build-*/
+
+# IDE
+/.vs/
+/.vscode/
+*.user
+*.suo
+
+# Dev helper (env wrappers)
+/.dev/
+
+# Install prefixes and downstream consumer builds (validation only)
+/_install/
+/_consumer/
+/_scratch/
+
+# Temporary artifacts
+/tmp/
+*.tmp
+*.bak
+
+# CUDA intermediates
+*.ptx
+*.cubin
+*.fatbin
+*.nvvm

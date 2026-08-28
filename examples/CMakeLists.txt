@@ -1,0 +1,3 @@
+add_executable(example_basic_cpu basic_cpu.cpp)
+target_link_libraries(example_basic_cpu PRIVATE graphcache)
+add_test(NAME example_basic_cpu COMMAND example_basic_cpu)
