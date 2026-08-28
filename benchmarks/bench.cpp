@@ -8,6 +8,9 @@
 #include <cstdio>
 #include <chrono>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <cstdlib>
 namespace {
 using clk = std::chrono::steady_clock;
 double ms_since(clk::time_point a, clk::time_point b) { return std::chrono::duration<double,std::milli>(b-a).count(); }
@@ -73,6 +76,38 @@ int main() {
   t1 = clk::now();
   std::printf("lookup: %.0f lookups/s (measured)\n", kLooks/(ms_since(t0,t1)/1000.0));
   std::printf("avoided-capture (derived from cold-vs-warm): %.2f ms over %d replays\n", capture_ms*(kReplays-1), kReplays);
+  // ---- Workload / thread / hit-miss matrix (measured) ----
+  {
+    const int N = 2000;
+    GraphCacheConfig s; s.backend_kind = BackendKind::Cpu; GraphCache scale(s);
+    std::vector<gc::GraphLookupRequest> reqs; reqs.reserve(N);
+    for (int i = 0; i < N; ++i) { reqs.push_back(cpu_request("w" + std::to_string(i))); }
+    auto ts0 = clk::now();
+    for (int i = 0; i < N; ++i) { if (!scale.lookup(reqs[i]).hit()) return 1; }
+    auto ts1 = clk::now();
+    std::printf("scale: insert+hit %d graphs: %.2f ms (measured)\n", N, ms_since(ts0,ts1));
+    ts0 = clk::now();
+    for (int i = 0; i < N; ++i) { if (!scale.lookup(reqs[i]).hit()) return 1; }
+    ts1 = clk::now();
+    std::printf("scale: 100%c hit 1-thread lookups: %.0f/s (measured over %d)\n", '%', N/(ms_since(ts0,ts1)/1000.0), N);
+    std::vector<gc::GraphLookupRequest> misses; misses.reserve(N/10);
+    for (int i = 0; i < N/10; ++i) { auto rq = cpu_request("miss" + std::to_string(i)); rq.allow_capture = false; misses.push_back(rq); }
+    int hits = 0, miss = 0;
+    ts0 = clk::now();
+    for (int i = 0; i < N; ++i) {
+      if (i % 10 == 0) { if (!scale.lookup(misses[i/10]).hit()) miss++; }
+      else { if (scale.lookup(reqs[i]).hit()) hits++; }
+    }
+    ts1 = clk::now();
+    std::printf("scale: 90/10 hit/miss 1-thread lookups: %.0f/s (measured, hits=%d misses=%d)\n", N/(ms_since(ts0,ts1)/1000.0), hits, miss);
+    std::atomic<int> thits{0};
+    std::vector<std::thread> ts;
+    ts0 = clk::now();
+    for (int t = 0; t < 8; ++t) ts.emplace_back([&, t]{ for (int i = t; i < N; i += 8) { if (scale.lookup(reqs[i]).hit()) thits.fetch_add(1); } });
+    for (auto& th : ts) th.join();
+    ts1 = clk::now();
+    std::printf("scale: 100%c hit 8-thread lookups: %.0f/s (measured, hits=%d)\n", '%', N/(ms_since(ts0,ts1)/1000.0), thits.load());
+  }
   auto m = cache.metrics();
   std::printf("metrics: captures=%llu replays=%llu lookups=%llu (measured)\n",(unsigned long long)m.captures,(unsigned long long)m.replays,(unsigned long long)m.lookups);
   return 0;

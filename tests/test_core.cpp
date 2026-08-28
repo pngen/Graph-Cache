@@ -247,4 +247,25 @@ GC_TEST(decide_compatibility_rebinding) {
   CHECK(dec.needs_rebinding());
 }
 
+
+GC_TEST(decide_incompatible_rebinding_rejected_when_immutable) {
+  auto d = test_util::make_cpu_graph("immutable", 64, /*rebindable*/ false);
+  gc::CompatibilityFacts cand;
+  cand.workload.logical_name = "immutable";
+  cand.backend = d.backend; cand.runtime = d.runtime; cand.device = d.device;
+  cand.topology_canonical = gc::canonical_topology(d.nodes, d.edges);
+  cand.datatypes.push_back(gc::Datatype::F32);
+  cand.layouts.push_back(gc::TensorLayout::Contiguous);
+  cand.binding.binding_class = gc::BindingClass::ImmutableBinding;
+  cand.binding.rebinding_eligible = false;
+  cand.binding.memory_binding_schema = "scale:1";
+  cand.dependencies = d.dependencies;
+  gc::CompatibilityFacts req = cand;
+  req.binding.memory_binding_schema = "scale:9";  // differs, but not reboundable
+  gc::GraphCompatibilityPolicy pol;
+  auto dec = gc::decide_compatibility(req, cand, pol);
+  CHECK(!dec.compatible());  // immutable: a binding change is never replay-safe
+  CHECK(dec.klass == gc::GraphCompatibilityClass::IncompatibleMemoryBinding);
+}
+
 GC_TEST_MAIN
