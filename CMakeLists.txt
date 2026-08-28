@@ -14,7 +14,7 @@ endif()
 
 option(GRAPHCACHE_BUILD_TESTS "Build Graph Cache tests" ON)
 option(GRAPHCACHE_BUILD_EXAMPLES "Build Graph Cache examples" ON)
-option(GRAPHCACHE_BUILD_BENCHMARKS "Build Graph Cache benchmarks" ON)
+option(GRAPHCACHE_BUILD_BENCHMARKS "Build Graph Cache benchmarks" OFF)
 option(GRAPHCACHE_BUILD_CLI "Build Graph Cache CLI" ON)
 option(GRAPHCACHE_ENABLE_CUDA "Enable CUDA Graph backend if CUDA is available" ON)
 

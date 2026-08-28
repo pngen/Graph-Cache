@@ -159,8 +159,8 @@ int main(int argc, char** argv) {
     resp.type = m.type == gc::ProtocolMessageType::CaptureInstruct ? gc::ProtocolMessageType::CaptureResult
                                                                    : gc::ProtocolMessageType::ReplayResult;
     resp.request_id = m.request_id;
-    resp.epoch = ack->epoch;
-    resp.cache_gen = ack->cache_gen;
+    resp.epoch = m.epoch;          // echo the coordinator's current authority
+    resp.cache_gen = m.cache_gen;  // from the instruction, not the stale register-time value
     resp.worker_id = gc::WorkerId(st.worker_id);
     resp.worker_boot = gc::WorkerBootId(st.boot_id);
     resp.capture_attempt = m.capture_attempt;
@@ -169,7 +169,6 @@ int main(int argc, char** argv) {
     resp.status = gc::ProtocolStatus::Ok;
 
     if (m.type == gc::ProtocolMessageType::CaptureInstruct) {
-      std::fprintf(stderr, "worker: CaptureInstruct attempt=%llu\n", m.capture_attempt.value);
       auto dc = decode_capture(m.payload);
       if (!dc.ok()) { resp.status = gc::ProtocolStatus::CaptureFailed; send_quiet(s, resp); continue; }
       auto desc = dc->descriptor;
@@ -185,7 +184,6 @@ int main(int argc, char** argv) {
       resp.payload = w.take();
       send_quiet(s, resp);
     } else if (m.type == gc::ProtocolMessageType::ReplayInstruct) {
-      std::fprintf(stderr, "worker: ReplayInstruct\n");
       auto dc = decode_replay_instruct(m.payload);
       if (!dc.ok()) { resp.status = gc::ProtocolStatus::ReplayFailed; send_quiet(s, resp); continue; }
       const std::string& hex = dc->first;

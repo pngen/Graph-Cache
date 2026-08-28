@@ -26,7 +26,7 @@ gc_add_test(test_property test_property.cpp)
 gc_add_test(test_access test_access.cpp)
 # The atomic multiprocess stale-authority proof is an in-progress proof; it is
 # opt-in (GRAPHCACHE_BUILD_ATOMIC_PROOF=ON) so the default suite passes clean.
-option(GRAPHCACHE_BUILD_ATOMIC_PROOF "Build the atomic multiprocess proof" OFF)
+option(GRAPHCACHE_BUILD_ATOMIC_PROOF "Build the atomic multiprocess proof" ON)
 if(GRAPHCACHE_BUILD_ATOMIC_PROOF)
   gc_add_test(test_protocol test_protocol.cpp)
 endif()

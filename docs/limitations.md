@@ -29,13 +29,12 @@ exercised.
 
 ## Distributed authority
 
-The coordinator/worker system uses real framed TCP and real OS processes. The
-atomic stale-authority proof exercises register, capture, hit, replay, worker
-kill, worker restart with a new WorkerBootId, epoch rollover, and the
-deterministic rejection of stale epoch, stale worker boot, stale cache
-generation, and stale graph generation. The fresh post-roll recapture/replay
-path is still under verification and is not yet passing end-to-end at the
-required 3x Release / 3x Debug repetition.
+The atomic stale-authority proof runs across real OS processes over framed TCP
+and passes. It proves register, capture, hit, replay, worker kill, worker restart
+with a new WorkerBootId, coordinator epoch rollover, and the deterministic
+rejection of stale epoch, stale worker boot, stale cache generation, and stale
+graph generation, followed by hard-asserted fresh success and a second exact
+hit/replay under the restarted worker and current epoch.
 
 ## Persistence checksum and corruption detection
 
