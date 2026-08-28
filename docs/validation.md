@@ -25,3 +25,40 @@ atomic lease counter. The audit enforces:
   lock is held.
 - No worker thread is joined while holding state it needs to exit.
 - The lock acquire order is strictly: registry (shared/unique) -> per-entry.
+## Explainability
+
+Operators can answer the following, via the structured Explain / reasons fields
+and the compatibility decision:
+
+- **Why was this graph a hit?** The lookup's decision class is ExactCompatible
+  (or CompatibleWith*), and the Explain json carries the outcome, artifact,
+  generation, decision class, and any compatible reasons.
+- **Why was it a miss?** LookupResult.outcome gives MissIncompatible /
+  MissStaleDependency / MissInvalidated / MissCaptureRequired / etc., and the
+  reasons list names the failing field.
+- **Why graph A over graph B?** Candidates are ranked by the best compatible
+  decision; ExactCompatible is preferred over CompatibleWith*.
+- **Why compatible / incompatible, and which field failed?** Each CompatibilityReason
+  carries a code and a field (e.g., datatype, layout, alignment, topology,
+  dependency, binding) plus wording; decide_compatibility records the first/prime
+  failing class.
+- **Why was recapture required?** Search found no replay-eligible candidate for a
+  captured (or invalidated) workload, or a recovered entry must be recaptured.
+- **Why was rebinding allowed / rejected?** Binding class and rebinding_eligible
+  determine it; an ImmutableBinding or RecaptureRequiredBinding change is always
+  rejected as IncompatibleMemoryBinding.
+- **Why was this graph invalidated / which dependency made it stale?**
+  InvalidationResult reports invalidated counts; is_dependency_fresh identifies a
+  correctness-contributing dependency whose generation/digest/ABI changed
+  (MissStaleDependency).
+- **Why backend-resident / evicted?** ResidencyPolicy and the cost-aware scorer
+  decide residency; eviction reasons are recorded as Events.
+- **Why did a request wait on an existing capture?** LookupResult.waited_on_capture
+  is set when a single-flight capture was joined rather than started.
+- **Why was a stale capture / replay / recovery recapture rejected?** The
+  generation-authority checks return StaleEpoch / StaleWorkerBoot /
+  StaleCacheGeneration / StaleGraphGeneration / StaleCaptureAttempt /
+  StaleReplayAttempt structured statuses.
+- **Why was a persisted graph rejected as corrupt?** PersistenceStore rejects
+  with PersistenceCorrupt / PersistenceTruncated / PersistenceUnknownVersion /
+  PersistenceTrailingGarbage, and recover increments the corruption metric.
