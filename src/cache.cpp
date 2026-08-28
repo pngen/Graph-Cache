@@ -258,6 +258,20 @@ struct GraphCache::Impl {
     mutator(metrics);
   }
 
+  void bump_scopes(const CompatibilityFacts& facts, auto&& fn) {
+    std::lock_guard<std::mutex> lock(metrics_mutex);
+    fn(metrics.per_workload[facts.workload.logical_name]);
+    fn(metrics.per_device[facts.device.architecture]);
+    fn(metrics.per_namespace[facts.workload.namespace_name]);
+  }
+
+  void bump_scope_raw(const std::string& wl, const std::string& dev, const std::string& ns, auto&& fn) {
+    std::lock_guard<std::mutex> lock(metrics_mutex);
+    fn(metrics.per_workload[wl]);
+    fn(metrics.per_device[dev]);
+    fn(metrics.per_namespace[ns]);
+  }
+
   struct SpawnResult {
     Result<GraphArtifactId> res;
     bool owned{false};
@@ -365,6 +379,7 @@ GraphLookupResult GraphCache::lookup(const GraphLookupRequest& req) {
     return res;
   }
   const std::string keyhex = keyres.value().digest_hex();
+  impl_->bump_scopes(facts, [](auto& m) { m.lookups++; });
 
   GraphCompatibilityPolicy policy = req.policy;
 
@@ -374,6 +389,7 @@ GraphLookupResult GraphCache::lookup(const GraphLookupRequest& req) {
     return cand;
   }
   res = cand;  // preserve the miss outcome/decision
+  impl_->bump_scopes(facts, [](auto& m) { m.misses++; });
   res.reason_text = impl_->miss_reason(res, facts, policy, keyhex);
 
   const bool allowed = req.allow_capture && impl_->config.allow_capture;
@@ -431,6 +447,8 @@ Result<GraphReplayResult> GraphCache::replay(const GraphReplayRequest& req) {
     return Result<GraphReplayResult>::failure(replay.error());
   }
   entry->reuse_count.fetch_add(1);
+  impl_->bump_scope_raw(entry->workload.logical_name, entry->descriptor.device.architecture,
+                        entry->workload.namespace_name, [](auto& m) { m.replays++; });
   impl_->touch_metric([&](Metrics& m) { m.replays++; m.replay_latency_us = elapsed; });
   impl_->record_event("replay", "ok", "\"nodes\":\"" + std::to_string(replay.value().replayed_nodes) + "\"");
   return Result<GraphReplayResult>::success(std::move(replay.value()));
@@ -546,6 +564,8 @@ Result<GraphArtifactId> GraphCache::Impl::capture_graph(const GraphLookupRequest
     if (p.ok()) entry->persisted_flag = true;
   }
   touch_metric([](Metrics& m) { m.captures++; });
+  bump_scope_raw(entry->workload.logical_name, entry->descriptor.device.architecture,
+                 entry->workload.namespace_name, [](auto& m) { m.captures++; });
   record_event("capture.complete", "graph captured", "\"artifact\":\"" + entry->artifact_id.to_string() + "\"");
   return Result<GraphArtifactId>::success(entry->artifact_id);
 }
@@ -674,9 +694,11 @@ std::shared_ptr<GraphLease> GraphCache::Impl::make_lease(const std::shared_ptr<C
                                                     e->desc_view, needs_rebind));
 }
 
-void GraphCache::Impl::finish_hit(GraphLookupResult& res, const GraphLookupRequest& /*req*/,
+void GraphCache::Impl::finish_hit(GraphLookupResult& res, const GraphLookupRequest& req,
                                   std::uint64_t start_us) {
   const auto elapsed = now_us() - start_us;
+  bump_scope_raw(req.workload.logical_name, req.device.architecture,
+                 req.workload.namespace_name, [](auto& m) { m.hits++; });
   touch_metric([&](Metrics& m) {
     m.lookup_latency_us = elapsed;
     switch (res.outcome) {
@@ -876,6 +898,8 @@ InvalidationResult GraphCache::invalidate(const InvalidationRequest& req) {
     if (e->lease_count.load() > 0) res.still_leasing++;
     res.invalidated++;
     impl_->graph_generation_counter.fetch_add(1);
+    impl_->bump_scope_raw(e->workload.logical_name, e->descriptor.device.architecture,
+                          e->workload.namespace_name, [](auto& m) { m.invalidations++; });
   }
   res.new_cache_generation = new_gen;
   impl_->touch_metric([&](Metrics& m) { m.invalidations += res.invalidated; });

@@ -1,2 +1,7 @@
 add_executable(gc-bench bench.cpp)
 target_link_libraries(gc-bench PRIVATE graphcache)
+if(GRAPHCACHE_HAS_CUDA)
+  add_executable(gc-bench-cuda cuda_bench.cpp)
+  target_link_libraries(gc-bench-cuda PRIVATE graphcache)
+  target_compile_definitions(gc-bench-cuda PRIVATE GC_HAS_CUDA=1)
+endif()

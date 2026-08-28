@@ -92,6 +92,10 @@ GC_TEST(public_api_surface) {
   CHECK(s.graphs_total >= 1);
   CHECK(!ex.json.empty());
   CHECK(ev.size() >= 1);
+  // Per-scope economics accounting.
+  CHECK(m.per_workload.find("access") != m.per_workload.end());
+  CHECK(m.per_workload["access"].lookups >= 1);
+  CHECK(m.per_namespace[""].lookups >= 1);
 
   // Reservation type.
   gc::GraphReservation reserve;

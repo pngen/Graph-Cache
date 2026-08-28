@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -187,6 +188,15 @@ struct InvalidationResult {
 };
 
 // ---- Observability ----
+struct PerScopeMetrics {
+  std::uint64_t lookups{0};
+  std::uint64_t hits{0};
+  std::uint64_t misses{0};
+  std::uint64_t replays{0};
+  std::uint64_t captures{0};
+  std::uint64_t invalidations{0};
+};
+
 struct Metrics {
   // Counters (measured unless noted).
   std::uint64_t lookups{0};
@@ -222,6 +232,11 @@ struct Metrics {
   std::uint64_t replay_latency_us{0};
   std::uint64_t persistence_latency_us{0};
   std::uint64_t recovery_latency_us{0};
+  // Per-scope breakdowns (measured). Keys are workload logical name, device
+  // architecture, and namespace name.
+  std::map<std::string, PerScopeMetrics> per_workload;
+  std::map<std::string, PerScopeMetrics> per_device;
+  std::map<std::string, PerScopeMetrics> per_namespace;
 };
 
 struct Snapshot {
