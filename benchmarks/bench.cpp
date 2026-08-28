@@ -106,7 +106,24 @@ int main() {
     for (int t = 0; t < 8; ++t) ts.emplace_back([&, t]{ for (int i = t; i < N; i += 8) { if (scale.lookup(reqs[i]).hit()) thits.fetch_add(1); } });
     for (auto& th : ts) th.join();
     ts1 = clk::now();
-    std::printf("scale: 100%c hit 8-thread lookups: %.0f/s (measured, hits=%d)\n", '%', N/(ms_since(ts0,ts1)/1000.0), thits.load());
+    std::printf("scale: 100%c hit 8-thread lookups: %.0f/s (measured, hits=%d)\n", '%', N/(ms_since(ts0,ts1)/1000.0), thits.load());    // 50/50 hit/miss (alternate seen / never-seen, no capture).
+    int h5050 = 0, m5050 = 0;
+    ts0 = clk::now();
+    for (int i = 0; i < N; ++i) {
+      if (i % 2 == 0) { if (scale.lookup(reqs[i]).hit()) h5050++; }
+      else { if (!scale.lookup(misses[(i/2) % misses.size()]).hit()) m5050++; }
+    }
+    ts1 = clk::now();
+    std::printf("scale: 50/50 hit/miss 1-thread lookups: %.0f/s (measured, hits=%d misses=%d)\n", N/(ms_since(ts0,ts1)/1000.0), h5050, m5050);
+    // Different topology size (256 elements) hit throughput.
+    std::vector<gc::GraphLookupRequest> big; big.reserve(N/2);
+    for (int i = 0; i < N/2; ++i) { auto rq = cpu_request("big" + std::to_string(i), 2.0, 1024); big.push_back(rq); }
+    for (int i = 0; i < N/2; ++i) { if (!scale.lookup(big[i]).hit()) return 1; }
+    ts0 = clk::now();
+    for (int i = 0; i < N/2; ++i) { if (!scale.lookup(big[i]).hit()) return 1; }
+    ts1 = clk::now();
+    std::printf("scale: 256-elem topo 1-thread lookups: %.0f/s (measured over %d)\n", (N/2)/(ms_since(ts0,ts1)/1000.0), N/2);
+
   }
   auto m = cache.metrics();
   std::printf("metrics: captures=%llu replays=%llu lookups=%llu (measured)\n",(unsigned long long)m.captures,(unsigned long long)m.replays,(unsigned long long)m.lookups);
