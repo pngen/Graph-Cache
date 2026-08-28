@@ -145,6 +145,11 @@ struct GraphReplayRequest {
   ReplayDescriptor descriptor;
 };
 
+// The result of validating a captured graph before eligibility. Validation
+// successes/failures are surfaced through the engine's Result<void> paths; this
+// alias names the validation-result type explicitly.
+using GraphValidationResult = Result<void>;
+
 // A reservation records that a capture attempt owns creation of one graph
 // generation. It is single-flight-scoped and never grants replay eligibility.
 struct GraphReservation {

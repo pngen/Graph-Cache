@@ -4,6 +4,7 @@
 #include "graphcache/cache.hpp"
 #include "graphcache/compatibility.hpp"
 #include "graphcache/sha256.hpp"
+#include "graphcache/serialization.hpp"
 #include "graphcache/topology.hpp"
 #include <cstdio>
 #include <chrono>
@@ -135,6 +136,25 @@ int main() {
     std::printf("scale: %d-graph 100%c hit 1-thread lookups: %.0f/s (measured)\n", M, '%', M/(ms_since(ts0,ts1)/1000.0));
 
 
+  }
+  // ---- 100k metadata-entry operations (where practical) ----
+  {
+    const int KM = 100000;
+    std::vector<std::uint8_t> blob;
+    [[maybe_unused]] auto _sb = gc::serialize_descriptor(req.descriptor, blob);
+    clk::time_point s0, s1;
+    s0 = clk::now();
+    for (int i = 0; i < KM; ++i) { std::vector<std::uint8_t> b; [[maybe_unused]] auto _s = gc::serialize_descriptor(req.descriptor, b); }
+    s1 = clk::now();
+    std::printf("scale: graph-metadata serialize 100k entries: %.0f/s (measured)\n", KM/(ms_since(s0,s1)/1000.0));
+    s0 = clk::now();
+    for (int i = 0; i < KM; ++i) { auto k = GraphCompatibilityKey::build(facts); if (!k.ok()) return 1; }
+    s1 = clk::now();
+    std::printf("scale: compat-key 100k entries: %.0f/s (measured)\n", KM/(ms_since(s0,s1)/1000.0));
+    s0 = clk::now();
+    for (int i = 0; i < KM; ++i) { auto d2 = gc::deserialize_descriptor(blob); if (!d2.ok()) return 1; }
+    s1 = clk::now();
+    std::printf("scale: graph-metadata deserialize 100k entries: %.0f/s (measured)\n", KM/(ms_since(s0,s1)/1000.0));
   }
   auto m = cache.metrics();
   std::printf("metrics: captures=%llu replays=%llu lookups=%llu (measured)\n",(unsigned long long)m.captures,(unsigned long long)m.replays,(unsigned long long)m.lookups);

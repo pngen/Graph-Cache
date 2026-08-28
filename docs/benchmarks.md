@@ -25,6 +25,9 @@ it is never presented as a directly measured quantity.
 | 256-element topology 1-thread | ~117,000/s |
 | insert+hit 10,000 graphs | ~336 ms |
 | 10,000-graph 100% hit 1-thread | ~104,000/s |
+| graph-metadata serialize 100k entries | ~386,000/s |
+| compat-key 100k entries | ~242,000/s |
+| graph-metadata deserialize 100k entries | ~1,139,000/s |
 
 ## CUDA (gc-bench-cuda), NVIDIA GeForce RTX 5090 (compute 12.0 / sm_120)
 
