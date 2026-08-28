@@ -122,7 +122,18 @@ int main() {
     ts0 = clk::now();
     for (int i = 0; i < N/2; ++i) { if (!scale.lookup(big[i]).hit()) return 1; }
     ts1 = clk::now();
-    std::printf("scale: 256-elem topo 1-thread lookups: %.0f/s (measured over %d)\n", (N/2)/(ms_since(ts0,ts1)/1000.0), N/2);
+    std::printf("scale: 256-elem topo 1-thread lookups: %.0f/s (measured over %d)\n", (N/2)/(ms_since(ts0,ts1)/1000.0), N/2);    // 10k graphs insert+hit (larger authority).
+    const int M = 10000;
+    GraphCacheConfig s10; s10.backend_kind = BackendKind::Cpu; GraphCache scale10(s10);
+    ts0 = clk::now();
+    for (int i = 0; i < M; ++i) { if (!scale10.lookup(cpu_request("w10_" + std::to_string(i))).hit()) return 1; }
+    ts1 = clk::now();
+    std::printf("scale: insert+hit %d graphs: %.2f ms (measured)\n", M, ms_since(ts0,ts1));
+    ts0 = clk::now();
+    for (int i = 0; i < M; ++i) { if (!scale10.lookup(cpu_request("w10_" + std::to_string(i))).hit()) return 1; }
+    ts1 = clk::now();
+    std::printf("scale: %d-graph 100%c hit 1-thread lookups: %.0f/s (measured)\n", M, '%', M/(ms_since(ts0,ts1)/1000.0));
+
 
   }
   auto m = cache.metrics();
