@@ -179,6 +179,20 @@ Result<GraphReplayResult> CpuBackend::replay(const GraphDescriptor& desc,
   GraphReplayResult r;
   r.replay_attempt = rd.replay_attempt.value;
   (void)desc;
+  // A node moves its captured byte count; a caller buffer whose declared size
+  // is smaller (e.g. a dynamic-shape hit for a smaller shape) is rejected
+  // instead of being read or written past its end.
+  auto fits = [](const std::vector<std::size_t>& sizes, std::uint32_t idx, std::uint64_t need) {
+    return idx >= sizes.size() || sizes[idx] >= need;
+  };
+  for (const auto& n : g->nodes) {
+    const bool reads = n.category == NodeCategory::MemoryCopy || n.category == NodeCategory::Kernel;
+    const bool writes = reads || n.category == NodeCategory::MemorySet;
+    if ((reads && !fits(buffers.input_bytes, n.src_index, n.bytes)) ||
+        (writes && !fits(buffers.output_bytes, n.dst_index, n.bytes))) {
+      return Result<GraphReplayResult>::failure(Error(ErrorCode::InvalidArgument, "replay buffer smaller than the graph node"));
+    }
+  }
   Sha256 h;
   for (const auto& nid : g->order) {
     const CpuNode* node = nullptr;

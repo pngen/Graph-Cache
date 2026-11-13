@@ -24,6 +24,9 @@ gc_add_test(test_adversarial test_adversarial.cpp)
 gc_add_test(test_concurrency test_concurrency.cpp)
 gc_add_test(test_property test_property.cpp)
 gc_add_test(test_access test_access.cpp)
+gc_add_test(test_regression test_regression.cpp)
+# Coordinator regression scenarios (spawn tools/gc-coordinator and gc-worker).
+gc_add_test(test_dist_regression test_dist_regression.cpp)
 # The atomic multiprocess stale-authority proof is an in-progress proof; it is
 # opt-in (GRAPHCACHE_BUILD_ATOMIC_PROOF=ON) so the default suite passes clean.
 option(GRAPHCACHE_BUILD_ATOMIC_PROOF "Build the atomic multiprocess proof" ON)

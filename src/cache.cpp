@@ -38,9 +38,12 @@ struct CacheEntry {
   std::atomic<std::uint64_t> instantiate_cost_us{0};
   std::atomic<std::uint64_t> artifact_size{0};
   std::uint64_t dependency_generation{0};
-  bool invalidated{false};
+  // Set under the registry lock by invalidate(); read by lookups without it.
+  std::atomic<bool> invalidated{false};
+  // Strong invalidation revokes leases already granted (replay is refused).
+  std::atomic<bool> revoked{false};
   std::atomic<bool> persisted_flag{false};
-  std::mutex entry_mutex;   // guards exec handle + residency transitions
+  std::mutex entry_mutex;   // guards exec handle + residency transitions + lease creation
 };
 
 } // namespace detail
@@ -286,7 +289,23 @@ struct GraphCache::Impl {
   std::string miss_reason(const GraphLookupResult& res, const CompatibilityFacts& facts,
                           const GraphCompatibilityPolicy& policy, const std::string& keyhex);
   std::shared_ptr<GraphLease> make_lease(const std::shared_ptr<CacheEntry>& e, bool needs_rebind);
-  Result<void> materialize_exec(const std::shared_ptr<CacheEntry>& e);
+  Result<void> materialize_exec_locked(const std::shared_ptr<CacheEntry>& e);
+  // Residency of a live executable: the CPU DAG lives on the host; other
+  // backends hold instantiated backend state.
+  ResidencyTier live_tier() const {
+    return backend->identity().kind == BackendKind::Cpu ? ResidencyTier::HostResident
+                                                        : ResidencyTier::BackendResident;
+  }
+  // Release an entry's executable. The caller holds e->entry_mutex and has
+  // checked that no lease holds it.
+  void retire_exec_locked(const std::shared_ptr<CacheEntry>& e) {
+    if (e->exec) {
+      auto u = backend->unload(e->descriptor, e->exec);
+      (void)u;
+      e->exec.reset();
+    }
+    e->residency = e->persisted_flag.load() ? ResidencyTier::PersistentStorage : ResidencyTier::MetadataOnly;
+  }
   Result<void> persist_entry(const std::shared_ptr<CacheEntry>& e);
   Result<std::shared_ptr<CacheEntry>> load_entry(const GraphArtifactId& id);
 };
@@ -434,6 +453,8 @@ Result<GraphReplayResult> GraphCache::replay(const GraphReplayRequest& req) {
   if (!entry) return Result<GraphReplayResult>::failure(Error(ErrorCode::LeaseNotHeld, "lease lost its entry"));
   if (!impl_->backend) return Result<GraphReplayResult>::failure(Error(ErrorCode::BackendUnavailable, "no backend"));
   if (!req.lease->executable()) return Result<GraphReplayResult>::failure(Error(ErrorCode::NotResident, "lease executable not backend-resident"));
+  // Strong invalidation revokes leases that were already granted.
+  if (entry->revoked) return Result<GraphReplayResult>::failure(Error(ErrorCode::Invalidated, "lease revoked by strong invalidation"));
 
   impl_->active_replays.fetch_add(1);
   entry->active_replays.fetch_add(1);
@@ -532,7 +553,7 @@ Result<GraphArtifactId> GraphCache::Impl::capture_graph(const GraphLookupRequest
   entry->generation = GraphGeneration(graph_generation_counter.fetch_add(1));
   entry->cache_generation = CacheGeneration(cache_generation.load());
   entry->lifecycle = GraphLifecycle::Valid;
-  entry->residency = ResidencyTier::HostResident;
+  entry->residency = live_tier();
   entry->exec = exec;
   entry->capture_cost_us = now_us() - start;
   entry->artifact_size = entry->descriptor.semantic_canonical.size() + 256;
@@ -545,14 +566,14 @@ Result<GraphArtifactId> GraphCache::Impl::capture_graph(const GraphLookupRequest
 
   const std::string keyhex = entry->key.digest_hex();
   {
-    std::unique_lock<std::mutex> lock(capture_mutex);
+    std::unique_lock<std::shared_mutex> lk(registry_mutex);
     // A stale capture must not publish: generation rolled or key invalidated.
+    // The check runs under the registry lock that invalidate() takes to select
+    // its targets, so an invalidation either precedes the check (and is seen)
+    // or follows the publication (and invalidates the new entry).
     if (cache_generation.load() != gen_at_start) {
       return Result<GraphArtifactId>::failure(Error(ErrorCode::StaleCompletion, "cache generation rolled during capture"));
     }
-  }
-  {
-    std::unique_lock<std::shared_mutex> lk(registry_mutex);
     by_artifact[entry->artifact_id] = entry;
     by_key[keyhex].push_back(entry);
     by_workload[workload_key(entry->workload)].push_back(entry);
@@ -625,23 +646,30 @@ GraphLookupResult GraphCache::Impl::search_candidates(const CompatibilityFacts& 
     chosen->last_access_ms = now_ms();
     chosen->reuse_count.fetch_add(1);
   }
-  // Materialize backend-resident (or recapture) state outside the registry lock.
-  auto mat = materialize_exec(chosen);
-  if (!mat.ok()) {
-    res.outcome = LookupOutcome::MissCaptureRequired;
-    res.reason_text = "cannot materialize graph executable: " + mat.error().message;
-    return res;
-  }
+  // Materialize backend-resident (or recapture) state outside the registry
+  // lock, and take the lease under the same per-entry mutex: eviction, unload
+  // and invalidation retire executables under it, so a lease is never granted
+  // on an executable being retired or after an invalidation retired it.
   {
-    std::shared_lock<std::shared_mutex> lk(registry_mutex);
-    if (chosen->invalidated || !lifecycle_is_replay_eligible(chosen->lifecycle.load())) {
+    std::lock_guard<std::mutex> lm(chosen->entry_mutex);
+    if (chosen->invalidated || chosen->revoked || !lifecycle_is_replay_eligible(chosen->lifecycle.load())) {
       res.outcome = LookupOutcome::MissInvalidated;
       return res;
     }
+    auto mat = materialize_exec_locked(chosen);
+    if (!mat.ok()) {
+      res.outcome = LookupOutcome::MissCaptureRequired;
+      res.reason_text = "cannot materialize graph executable: " + mat.error().message;
+      return res;
+    }
+    if (chosen->invalidated || chosen->revoked || !lifecycle_is_replay_eligible(chosen->lifecycle.load())) {
+      res.outcome = LookupOutcome::MissInvalidated;
+      return res;
+    }
+    res.artifact_id = chosen->artifact_id;
+    res.generation = chosen->generation;
+    res.lease = make_lease(chosen, best.needs_rebinding());
   }
-  res.artifact_id = chosen->artifact_id;
-  res.generation = chosen->generation;
-  res.lease = make_lease(chosen, best.needs_rebinding());
   switch (best.klass) {
     case GraphCompatibilityClass::ExactCompatible:
       res.outcome = (chosen->residency.load() == ResidencyTier::BackendResident)
@@ -661,8 +689,8 @@ GraphLookupResult GraphCache::Impl::search_candidates(const CompatibilityFacts& 
   return res;
 }
 
-Result<void> GraphCache::Impl::materialize_exec(const std::shared_ptr<CacheEntry>& e) {
-  std::lock_guard<std::mutex> lm(e->entry_mutex);
+Result<void> GraphCache::Impl::materialize_exec_locked(const std::shared_ptr<CacheEntry>& e) {
+  // The caller holds e->entry_mutex.
   if (e->exec) return Result<void>::success();
   auto attempt = CaptureAttemptId(capture_counter.fetch_add(1) + 1);
   auto cap = backend->capture(e->descriptor, attempt);
@@ -670,7 +698,7 @@ Result<void> GraphCache::Impl::materialize_exec(const std::shared_ptr<CacheEntry
   auto val = backend->validate(e->descriptor, cap.value());
   if (!val.ok()) return Result<void>::failure(Error(ErrorCode::ValidationFailed, val.error().message));
   e->exec = cap.value();
-  e->residency = ResidencyTier::HostResident;
+  e->residency = live_tier();
   touch_metric([](Metrics& m) { m.recaptures++; m.instantiations++; });
   return Result<void>::success();
 }
@@ -883,19 +911,31 @@ InvalidationResult GraphCache::invalidate(const InvalidationRequest& req) {
             targets.push_back(e);
         break;
     }
+    // Mark under the registry lock: lookups, captures and recovery read these
+    // flags and the invalidated-key set under the same lock. Targets that were
+    // already invalidated are dropped.
+    for (auto it = targets.begin(); it != targets.end();) {
+      if ((*it)->invalidated.exchange(true)) { it = targets.erase(it); continue; }
+      (*it)->lifecycle = GraphLifecycle::Invalidated;
+      impl_->invalidated_keys.insert((*it)->key.digest_hex());
+      ++it;
+    }
   }
   for (auto& e : targets) {
-    if (e->invalidated) continue;
-    e->invalidated = true;
-    e->lifecycle = GraphLifecycle::Invalidated;
-    impl_->invalidated_keys.insert(e->key.digest_hex());
-    std::lock_guard<std::mutex> lm(e->entry_mutex);
-    if (req.strong && e->lease_count.load() == 0 &&
-        e->residency.load() == ResidencyTier::BackendResident) {
-      auto u = impl_->backend->unload(e->descriptor, e->exec);
-      if (u.ok()) e->residency = ResidencyTier::PersistentStorage;
+    {
+      std::lock_guard<std::mutex> lm(e->entry_mutex);
+      // Strong invalidation revokes leases already granted; leases are created
+      // under this mutex, so every existing lease is covered.
+      if (req.strong) e->revoked = true;
+      // Retire backend state at the safe point: now, if no lease holds it.
+      if (e->lease_count.load() == 0) impl_->retire_exec_locked(e);
+      if (e->lease_count.load() > 0) res.still_leasing++;
     }
-    if (e->lease_count.load() > 0) res.still_leasing++;
+    // Persist the invalidation so a restart cannot resurrect the graph.
+    if (impl_->store && e->persisted_flag.load()) {
+      auto p = impl_->persist_entry(e);
+      (void)p;
+    }
     res.invalidated++;
     impl_->graph_generation_counter.fetch_add(1);
     impl_->bump_scope_raw(e->workload.logical_name, e->descriptor.device.architecture + "@" + std::to_string(e->descriptor.device.device_index),
@@ -926,9 +966,11 @@ Result<void> GraphCache::unpin(const GraphArtifactId& id) {
   auto it = impl_->by_artifact.find(id);
   if (it == impl_->by_artifact.end()) return Result<void>::failure(Error(ErrorCode::NoSuchArtifact, "no such artifact"));
   auto& e = it->second;
+  // Decrement only from a non-zero value: concurrent unpins must not wrap.
   std::uint64_t cur = e->pin_count.load();
-  if (cur == 0) return Result<void>::failure(Error(ErrorCode::LeaseUnderflow, "unpin underflow"));
-  e->pin_count.fetch_sub(1);
+  do {
+    if (cur == 0) return Result<void>::failure(Error(ErrorCode::LeaseUnderflow, "unpin underflow"));
+  } while (!e->pin_count.compare_exchange_weak(cur, cur - 1));
   return Result<void>::success();
 }
 
@@ -940,13 +982,14 @@ Result<void> GraphCache::evict(const GraphArtifactId& id) {
     if (it == impl_->by_artifact.end()) return Result<void>::failure(Error(ErrorCode::NoSuchArtifact, "no such artifact"));
     e = it->second;
   }
-  if (e->pin_count.load() > 0 || e->lease_count.load() > 0) {
-    return Result<void>::failure(Error(ErrorCode::EvictionImpossible, "graph is pinned or leased"));
-  }
-  std::lock_guard<std::mutex> lm(e->entry_mutex);
-  if (e->residency.load() == ResidencyTier::BackendResident) {
-    auto u = impl_->backend->unload(e->descriptor, e->exec);
-    if (u.ok()) e->residency = ResidencyTier::PersistentStorage;
+  {
+    // Leases are created under the entry mutex, so the lease check and the
+    // release of the executable cannot interleave with a new lease.
+    std::lock_guard<std::mutex> lm(e->entry_mutex);
+    if (e->pin_count.load() > 0 || e->lease_count.load() > 0) {
+      return Result<void>::failure(Error(ErrorCode::EvictionImpossible, "graph is pinned or leased"));
+    }
+    impl_->retire_exec_locked(e);
   }
   impl_->touch_metric([](Metrics& m) { m.evictions++; });
   impl_->record_event("evict", "graph evicted", "\"artifact\":\"" + id.to_string() + "\"");
@@ -961,12 +1004,9 @@ Result<void> GraphCache::unload(const GraphArtifactId& id) {
     if (it == impl_->by_artifact.end()) return Result<void>::failure(Error(ErrorCode::NoSuchArtifact, "no such artifact"));
     e = it->second;
   }
-  if (e->lease_count.load() > 0) return Result<void>::failure(Error(ErrorCode::NotResident, "cannot unload while leased"));
   std::lock_guard<std::mutex> lm(e->entry_mutex);
-  if (e->residency.load() == ResidencyTier::BackendResident) {
-    auto u = impl_->backend->unload(e->descriptor, e->exec);
-    if (u.ok()) e->residency = ResidencyTier::PersistentStorage;
-  }
+  if (e->lease_count.load() > 0) return Result<void>::failure(Error(ErrorCode::NotResident, "cannot unload while leased"));
+  impl_->retire_exec_locked(e);
   return Result<void>::success();
 }
 
@@ -1015,6 +1055,9 @@ Result<void> GraphCache::recover() {
     e->residency = ResidencyTier::MetadataOnly;
     e->exec = nullptr;
     std::unique_lock<std::shared_mutex> lk(impl_->registry_mutex);
+    // A live entry is authoritative: never replace it (or index a duplicate of
+    // it) with its persisted copy.
+    if (impl_->by_artifact.count(e->artifact_id)) continue;
     impl_->by_artifact[e->artifact_id] = e;
     impl_->by_key[e->key.digest_hex()].push_back(e);
     impl_->by_workload[workload_key(e->workload)].push_back(e);

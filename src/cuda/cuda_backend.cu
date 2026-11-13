@@ -69,6 +69,20 @@ struct CudaGraphState {
   int n{0};
   std::vector<float> h_in, h_out;
   std::mutex mtx;
+
+  CudaGraphState() = default;
+  CudaGraphState(const CudaGraphState&) = delete;
+  CudaGraphState& operator=(const CudaGraphState&) = delete;
+  // Release whatever unload() did not: a failed capture, or state dropped
+  // without an unload, must not leak the graph, stream and device buffers.
+  ~CudaGraphState() {
+    if (exec) cudaGraphExecDestroy(exec);
+    if (graph) cudaGraphDestroy(graph);
+    if (stream) cudaStreamDestroy(stream);
+    for (void* p : buffers) {
+      if (p) cudaFree(p);
+    }
+  }
 };
 
 void fill_pattern(float* p, std::size_t count, std::uint32_t seed) {
@@ -226,6 +240,11 @@ class CudaBackend final : public GraphBackend {
     if (!st) return Result<GraphReplayResult>::failure(Error(ErrorCode::InvalidArgument, "null cuda graph handle"));
     if (buffers.inputs.empty() || buffers.outputs.empty()) {
       return Result<GraphReplayResult>::failure(Error(ErrorCode::InvalidArgument, "cuda replay requires input and output buffers"));
+    }
+    // The memcpy nodes move the captured byte count: never past a caller buffer.
+    if ((!buffers.input_bytes.empty() && buffers.input_bytes[0] < st->bytes) ||
+        (!buffers.output_bytes.empty() && buffers.output_bytes[0] < st->bytes)) {
+      return Result<GraphReplayResult>::failure(Error(ErrorCode::InvalidArgument, "replay buffer smaller than the captured graph"));
     }
     std::lock_guard<std::mutex> lock(st->mtx);
     const void* hsrc = buffers.inputs[0];

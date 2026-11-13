@@ -46,6 +46,14 @@ struct PendingCapture {
   std::string key;
 };
 
+// A replay forwarded to a worker under a coordinator-assigned request id (client
+// request ids are only unique per client connection).
+struct PendingReplay {
+  std::int64_t client_sock{-1};
+  std::uint64_t client_request_id{0};
+  std::uint64_t worker_id{0};
+};
+
 struct State {
   gc::CoordinatorEpoch epoch{1};
   gc::CacheGeneration cache_gen{1};
@@ -57,7 +65,8 @@ struct State {
   std::map<std::string, Entry> graphs;                  // compat key hex -> entry
   std::set<std::string> invalidated;
   std::map<std::uint64_t, PendingCapture> pending;      // capture_attempt -> pending
-  std::map<std::uint64_t, std::int64_t> pending_replays;  // request_id -> client socket
+  std::uint64_t replay_counter{0};
+  std::map<std::uint64_t, PendingReplay> pending_replays;  // coordinator replay id -> requester
 };
 
 void send_quiet(std::int64_t s, const gc::ProtocolMessage& m) { auto r = gc::send_frame(s, m); (void)r; }
@@ -93,6 +102,32 @@ int main(int argc, char** argv) {
     m.cache_gen = cg.valid() ? cg : st.cache_gen;
     m.status = status;
     send_quiet(sock, m);
+  };
+
+  // True when `sock` is the current registered connection of worker `wid`.
+  auto is_current_worker = [&](const Conn& c, std::int64_t sock, std::uint64_t wid) {
+    if (!c.is_worker || c.worker_id != wid) return false;
+    auto it = st.worker_sock.find(wid);
+    return it != st.worker_sock.end() && it->second == sock;
+  };
+
+  // A capture or replay result rejected on authority (sent after an epoch roll
+  // or an invalidation) still answers the request waiting on it, so the
+  // requester never waits forever. Only the worker it was dispatched to can
+  // resolve it.
+  auto fail_pending_result = [&](const Conn& c, std::int64_t sock, const gc::ProtocolMessage& m,
+                                 gc::ProtocolStatus status) {
+    if (m.type == gc::ProtocolMessageType::CaptureResult) {
+      auto pit = st.pending.find(m.capture_attempt.value);
+      if (pit == st.pending.end() || !is_current_worker(c, sock, pit->second.worker_id)) return;
+      send_status(pit->second.client_sock, gc::ProtocolMessageType::LookupResult, pit->second.request_id, status, st.epoch, st.cache_gen);
+      st.pending.erase(pit);
+    } else if (m.type == gc::ProtocolMessageType::ReplayResult) {
+      auto rit = st.pending_replays.find(m.request_id);
+      if (rit == st.pending_replays.end() || !is_current_worker(c, sock, rit->second.worker_id)) return;
+      send_status(rit->second.client_sock, gc::ProtocolMessageType::ReplayResult, rit->second.client_request_id, status, st.epoch, st.cache_gen);
+      st.pending_replays.erase(rit);
+    }
   };
 
   bool running = true;
@@ -195,10 +230,12 @@ int main(int argc, char** argv) {
           send_status(s, m.type == gc::ProtocolMessageType::Lookup ? gc::ProtocolMessageType::LookupResult : (
                       m.type == gc::ProtocolMessageType::ReplayInstruct ? gc::ProtocolMessageType::ReplayResult : gc::ProtocolMessageType::LookupResult),
                       m.request_id, gc::ProtocolStatus::StaleEpoch, st.epoch);
+          fail_pending_result(c, s, m, gc::ProtocolStatus::StaleEpoch);
           continue;
         }
         if (m.cache_gen.valid() && m.cache_gen != st.cache_gen) {
           send_status(s, gc::ProtocolMessageType::LookupResult, m.request_id, gc::ProtocolStatus::StaleCacheGeneration, st.epoch);
+          fail_pending_result(c, s, m, gc::ProtocolStatus::CompletionAfterInvalidation);
           continue;
         }
         if (m.worker_id.valid() && boot_for(m.worker_id.value) != 0 &&
@@ -299,6 +336,11 @@ int main(int argc, char** argv) {
             send_status(s, gc::ProtocolMessageType::LookupResult, m.request_id, gc::ProtocolStatus::DuplicateCaptureCompletion, st.epoch);
             continue;
           }
+          // Only the worker connection the attempt was dispatched to completes it.
+          if (!is_current_worker(c, s, pit->second.worker_id)) {
+            send_status(s, gc::ProtocolMessageType::LookupResult, m.request_id, gc::ProtocolStatus::StaleCaptureAttempt, st.epoch);
+            continue;
+          }
           PendingCapture pc = pit->second;
           st.pending.erase(pit);
           if (m.status != gc::ProtocolStatus::Ok) {
@@ -380,23 +422,29 @@ int main(int argc, char** argv) {
           ri.replay_attempt = m.replay_attempt;
           // Forward the artifact + input.
           ri.payload = m.payload;
-          st.pending_replays[m.request_id] = s;
+          ri.request_id = ++st.replay_counter;
+          st.pending_replays[ri.request_id] = PendingReplay{s, m.request_id, wid};
           send_quiet(st.worker_sock[wid], ri);
           continue;
         }
 
         if (m.type == gc::ProtocolMessageType::ReplayResult) {
+          auto rit = st.pending_replays.find(m.request_id);
+          // Only the worker connection the replay was dispatched to answers it.
+          if (rit == st.pending_replays.end() || !is_current_worker(c, s, rit->second.worker_id)) {
+            send_status(s, gc::ProtocolMessageType::ReplayResult, m.request_id, gc::ProtocolStatus::StaleReplayAttempt, st.epoch);
+            continue;
+          }
+          PendingReplay pr = rit->second;
+          st.pending_replays.erase(rit);
           gc::ProtocolMessage resp;
           resp.type = gc::ProtocolMessageType::ReplayResult;
-          resp.request_id = m.request_id;
+          resp.request_id = pr.client_request_id;
           resp.epoch = st.epoch;
           resp.cache_gen = st.cache_gen;
           resp.status = m.status;
           resp.payload = m.payload;
-          auto rit = st.pending_replays.find(m.request_id);
-          std::int64_t target = rit != st.pending_replays.end() ? rit->second : s;
-          if (rit != st.pending_replays.end()) st.pending_replays.erase(rit);
-          send_quiet(target, resp);
+          send_quiet(pr.client_sock, resp);
           continue;
         }
 
@@ -425,7 +473,38 @@ int main(int argc, char** argv) {
     for (auto s : to_close) {
       auto it = conns.find(s);
       if (it != conns.end()) {
-        if (it->second.is_worker) st.worker_connected.erase(it->second.worker_id);
+        const Conn& gone = it->second;
+        // Only a worker's current connection unregisters it; a connection that
+        // a restart already replaced must not mark the restarted worker gone.
+        const bool current_worker = is_current_worker(gone, s, gone.worker_id);
+        if (current_worker) {
+          st.worker_connected.erase(gone.worker_id);
+          st.worker_sock.erase(gone.worker_id);
+        }
+        // Requests waiting on this connection are answered (worker gone) or
+        // detached from their requester (requester gone: a capture still
+        // publishes, but no reply goes to a dead or reused socket handle), so
+        // no requester waits forever.
+        for (auto pit = st.pending.begin(); pit != st.pending.end();) {
+          if (pit->second.client_sock == s) { pit->second.client_sock = -1; ++pit; continue; }
+          if (current_worker && pit->second.worker_id == gone.worker_id) {
+            send_status(pit->second.client_sock, gc::ProtocolMessageType::LookupResult, pit->second.request_id,
+                        gc::ProtocolStatus::WorkerUnavailable, st.epoch, st.cache_gen);
+            pit = st.pending.erase(pit);
+            continue;
+          }
+          ++pit;
+        }
+        for (auto rit = st.pending_replays.begin(); rit != st.pending_replays.end();) {
+          if (rit->second.client_sock == s) { rit->second.client_sock = -1; ++rit; continue; }
+          if (current_worker && rit->second.worker_id == gone.worker_id) {
+            send_status(rit->second.client_sock, gc::ProtocolMessageType::ReplayResult, rit->second.client_request_id,
+                        gc::ProtocolStatus::WorkerUnavailable, st.epoch, st.cache_gen);
+            rit = st.pending_replays.erase(rit);
+            continue;
+          }
+          ++rit;
+        }
         conns.erase(it);
       }
       close_quiet(gc::TcpSocket{s});

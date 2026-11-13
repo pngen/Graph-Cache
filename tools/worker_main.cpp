@@ -142,7 +142,9 @@ int main(int argc, char** argv) {
   reg.type = gc::ProtocolMessageType::Register;
   reg.worker_id = gc::WorkerId(st.worker_id);
   reg.worker_boot = gc::WorkerBootId(st.boot_id);
-  reg.epoch = gc::CoordinatorEpoch(1);
+  // A (re)starting worker cannot know the current coordinator epoch; claiming
+  // epoch 1 made every registration after an epoch roll fail as stale. The
+  // RegisterAck carries the current epoch.
   if (!gc::send_frame(s, reg).ok()) { close_quiet(sock); return 2; }
 
   auto ack = gc::recv_frame(s);
