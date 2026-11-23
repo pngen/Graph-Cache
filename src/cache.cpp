@@ -210,7 +210,9 @@ struct GraphCache::Impl {
   std::atomic<std::uint64_t> coordinator_epoch{1};
 
   // Leases / activity.
-  std::atomic<std::uint64_t> active_leases{0};
+  // Shared with every lease: a lease may be released after the cache is
+  // destroyed, and its release must not touch the destroyed cache.
+  std::shared_ptr<std::atomic<std::uint64_t>> active_leases{std::make_shared<std::atomic<std::uint64_t>>(0)};
   std::atomic<std::uint64_t> active_captures{0};
   std::atomic<std::uint64_t> active_replays{0};
 
@@ -708,14 +710,17 @@ std::shared_ptr<GraphLease> GraphCache::Impl::make_lease(const std::shared_ptr<C
   auto entry = std::make_shared<GraphLease::Entry>();
   entry->keep_alive = e;
   std::weak_ptr<CacheEntry> weak = e;
-  entry->release_fn = [this, weak]() {
+  // The release owns the counter it lowers and holds the entry weakly; it used
+  // to capture this, so a lease released after the cache was destroyed wrote
+  // into freed memory.
+  entry->release_fn = [leases = active_leases, weak]() {
     if (auto sp = weak.lock()) {
       if (sp->lease_count.load() > 0) sp->lease_count.fetch_sub(1);
     }
-    if (active_leases.load() > 0) active_leases.fetch_sub(1);
+    if (leases->load() > 0) leases->fetch_sub(1);
   };
   e->lease_count.fetch_add(1);
-  active_leases.fetch_add(1);
+  active_leases->fetch_add(1);
   // Construct directly (not make_shared) so this member function, which is a
   // friend context, can invoke the private GraphLease constructor.
   return std::shared_ptr<GraphLease>(new GraphLease(entry, e->artifact_id, e->generation, e->exec,
@@ -1099,7 +1104,7 @@ Metrics GraphCache::metrics() const {
   std::lock_guard<std::mutex> lk(impl_->metrics_mutex);
   Metrics m = impl_->metrics;
   m.backend_resident_count = resident;
-  m.active_leases = impl_->active_leases.load();
+  m.active_leases = impl_->active_leases->load();
   m.active_captures = impl_->active_captures.load();
   m.active_replays = impl_->active_replays.load();
   return m;
@@ -1119,7 +1124,7 @@ Snapshot GraphCache::snapshot() const {
   s.active_captures = impl_->active_captures.load();
   s.active_validations = 0;
   s.active_loads = 0;
-  s.active_leases = impl_->active_leases.load();
+  s.active_leases = impl_->active_leases->load();
   s.active_replays = impl_->active_replays.load();
   return s;
 }
